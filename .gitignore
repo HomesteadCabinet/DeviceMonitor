@@ -4,3 +4,7 @@ cron.err
 last_cleared_date.txt
 
 device_scan_log.csv
+
+last_cleared_date.tmp
+
+__pycache__/

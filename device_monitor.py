@@ -12,62 +12,57 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
 
+
+# List of devices to monitor with named URLs, IPs, directories, and ports
+devices = {
+    "ExampleDevice": {
+        "urls": [
+            {
+                'name': 'Example URL',
+                'value': 'https://example.com',
+            }
+        ],
+        "ips": [
+            {
+                'name': 'Example IP',
+                'value': '192.168.1.1'
+            }, {
+                'name': 'Example IP With port',
+                'value': '192.168.1.1',
+                'ports': [80, 443]
+            }, {
+                'name': 'Example IP, only do a port scan',
+                'value': '192.168.1.1',
+                'ports': [80, 443],
+                'onlyports': True
+            },
+        ],
+        "directories": [
+            {
+                'name': 'Example Directory',
+                'value': '/example/directory',
+            }
+        ],
+    },
+}
+
+
+# Email settings
+email_header = "Device Monitoring Report"
+sender_email = "noreply@example.net"
+receiver_emails = ["example@example.net", "example.1@example.net"]  # Multiple recipients
+email_password = "roureyteww834n"
+smtp_server = "smtp.gmail.com"
+smtp_port = 587
+
+
 # Threshold for slow response time (default 5 seconds = 5000 milliseconds)
 RESPONSE_TIME_THRESHOLD = 5000
 
 # Set TEMP_DIR to the directory where the script is located
 TEMP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(TEMP_DIR, "device_scan_log.csv")
-LAST_CLEARED_DATE_FILE = os.path.join(TEMP_DIR, "last_cleared_date.txt")
-
-# List of devices to monitor with named URLs, IPs, directories, and ports
-devices = {
-    # "Production Coach": {
-    #     "ips": [
-    #         {'name': 'ANDI Station', 'value': "192.168.1.52"},
-    #         {'name': 'BHX Station', 'value': "192.168.1.70"},
-    #         {'name': 'Checking', 'value': "192.168.1.198"},
-    #         {'name': 'Staging', 'value': "192.168.1.165"},
-    #         {'name': 'Wrapping', 'value': "192.168.1.134"},
-    #         {'name': 'Loading', 'value': "192.168.1.141"},
-    #     ],
-    # },
-    "LiteBeams": {
-        "ips": [
-            {'name': 'Beam1', 'value': "192.168.1.250"},
-            {'name': 'Beam2', 'value': "192.168.1.251"},
-        ],
-    },
-    "Reolink_NVR": {
-        "ips": [{'name': 'NVR', 'value': "192.168.1.28"}],
-    },
-    "Server 2019": {
-        "ips": [{'name': 'Server 2019', 'value': "192.168.1.35"}],
-    },
-    "Linux Server": {
-        "ips": [{'name': 'Linux Server', 'value': "192.168.1.84"}],
-    },
-    "Virtual Machines": {
-        "ips": [
-            {'name': 'vPC', 'value': "cloud.homesteadcabinet.net", 'ports': [13]},
-            {'name': 'Rivermill', 'value': "cloud.homesteadcabinet.net", 'ports': [15]},
-        ],
-    },
-    "Web Sites": {
-        "urls": [
-            {"name": "Homestead Cabinet", "value": "https://homesteadcabinet.net"},
-            {"name": "Homestead Bidding", "value": "https://orders.homesteadcabinet.net"},
-            {"name": "Homestead Cabinet Cloud", "value": "https://cloud.homesteadcabinet.net"},
-        ],
-    },
-}
-
-# Email settings
-sender_email = "noreply@homesteadcabinet.net"
-receiver_emails = ["brad@homesteadcabinet.net", "brad.1@homesteadcabinet.net"]  # Multiple recipients
-email_password = "yxmlclxkclfsoydf"
-smtp_server = "smtp.gmail.com"
-smtp_port = 587
+LAST_CLEARED_DATE_FILE = os.path.join(TEMP_DIR, "last_cleared_date.tmp")
 
 
 def clear_log_if_needed():
@@ -109,6 +104,8 @@ def ping_device(ip_info, device_name):
     """Ping a device."""
     ip = ip_info['value']
     print(f"Starting ping check for {device_name} ({ip_info['name']}) - {ip}")
+    if 'onlyports' in ip_info and ip_info['onlyports']:
+        return 0
     try:
         command = ["ping", "-n", "1", ip] if platform.system().lower() == "windows" else ["ping", "-c", "1", ip]
         start_time = time.time()
@@ -271,18 +268,4 @@ def prepare_email_body(offline_devices, high_response_devices):
         email_body += "\n\nLog Details:\n"
         email_body += log_file.read()
 
-    send_email("Device Monitoring Report", email_body)
-
-
-def main():
-    """Main function."""
-    clear_log_if_needed()
-    offline_devices, high_response_devices = check_devices()
-    if offline_devices or high_response_devices:
-        log_scan("SUMMARY", f"Offline: {offline_devices}, Slow: {high_response_devices}")
-    log_scan(None, None)
-    prepare_email_body(offline_devices, high_response_devices)
-
-
-if __name__ == "__main__":
-    main()
+    send_email(email_header, email_body)
