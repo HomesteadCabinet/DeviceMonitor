@@ -1,129 +1,108 @@
-# noqa
-
 import os
 import platform
 import subprocess
 import smtplib
-import time
-import socket
-import csv
+import local_config
 from datetime import datetime
+from openpyxl import Workbook, load_workbook
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
+import time
+import socket
 
+# Constants for Online and Offline statuses
+ONLINE = "Online"
+OFFLINE = "Offline"
 
 # List of devices to monitor with named URLs, IPs, directories, and ports
-devices = {
-    "ExampleDevice": {
-        "urls": [
-            {
-                'name': 'Example URL',
-                'value': 'https://example.com',
-            }
-        ],
-        "ips": [
-            {
-                'name': 'Example IP',
-                'value': '192.168.1.1'
-            }, {
-                'name': 'Example IP With port',
-                'value': '192.168.1.1',
-                'ports': [80, 443]
-            }, {
-                'name': 'Example IP, only do a port scan',
-                'value': '192.168.1.1',
-                'ports': [80, 443],
-                'onlyports': True
-            },
-        ],
-        "directories": [
-            {
-                'name': 'Example Directory',
-                'value': '/example/directory',
-            }
-        ],
-    },
-}
-
+devices = local_config.devices
 
 # Email settings
-email_header = "Device Monitoring Report"
-sender_email = "noreply@example.net"
-receiver_emails = ["example@example.net", "example.1@example.net"]  # Multiple recipients
-email_password = "roureyteww834n"
-smtp_server = "smtp.gmail.com"
-smtp_port = 587
-
+email_header = "Network Monitoring System"
+sender_email = local_config.sender_email
+receiver_emails = local_config.receiver_emails
+email_password = local_config.email_password
+smtp_server = local_config.smtp_server
+smtp_port = local_config.smtp_port
 
 # Threshold for slow response time (default 5 seconds = 5000 milliseconds)
 RESPONSE_TIME_THRESHOLD = 5000
 
-# Set TEMP_DIR to the directory where the script is located
+# Path to Excel log file
 TEMP_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(TEMP_DIR, "device_scan_log.csv")
-LAST_CLEARED_DATE_FILE = os.path.join(TEMP_DIR, "last_cleared_date.tmp")
+LOG_FILE = os.path.join(TEMP_DIR, "device_status_log.xlsx")
 
 
-def clear_log_if_needed():
-    """Clear the log file once per day."""
-    today = datetime.now().strftime('%Y-%m-%d')
+def initialize_log():
+    """Initialize the Excel log file if it doesn't exist."""
+    if not os.path.exists(LOG_FILE):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Device Status"
 
-    # Check if the last cleared date is saved and if it's different from today
-    if os.path.exists(LAST_CLEARED_DATE_FILE):
-        with open(LAST_CLEARED_DATE_FILE, "r") as file:
-            last_cleared_date = file.read().strip()
-    else:
-        last_cleared_date = None
+        # Header row
+        headers = ["Device Name", "Resource", "Type", "Last Status", "Last Checked", "Previous Status"]
+        ws.append(headers)
 
-    # Clear log if the last cleared date is not today
-    if last_cleared_date != today:
-        with open(LOG_FILE, "w", newline='') as log_file:
-            writer = csv.writer(log_file)
-            writer.writerow(["Date/Time", "Status", "Message"])  # Write header
-        with open(LAST_CLEARED_DATE_FILE, "w") as file:
-            file.write(today)
+        wb.save(LOG_FILE)
 
 
-def log_scan(status, message):
-    """Log the scan result in CSV format."""
-    with open(LOG_FILE, "a", newline='') as log_file:
-        writer = csv.writer(log_file)
-        if status is None and message is None:
-            writer.writerow(["----------", "----------", "----------"])
-        else:
-            writer.writerow([datetime.now().strftime('%Y-%m-%d %I:%M:%S %p'), status, message])
+def update_device_status(device_name, resource_name, resource_type, status):
+    """Update or insert device status in the Excel log file."""
+    wb = load_workbook(LOG_FILE)
+    ws = wb.active
+
+    current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
+    updated = False
+
+    # Iterate over rows to find the matching device/resource and update the status
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        if row[0].value == device_name and row[1].value == resource_name:
+            # Update existing entry
+            previous_status = row[3].value
+            row[5].value = previous_status  # Store previous status
+            row[3].value = status           # Update to new status
+            row[4].value = current_time     # Update the last checked time
+            updated = True
+            break
+
+    if not updated:
+        # Add a new entry if device/resource not found
+        ws.append([device_name, resource_name, resource_type, status, current_time, ""])
+
+    wb.save(LOG_FILE)
 
 
-def log_error(message):
-    """Log errors in CSV format."""
-    log_scan("ERROR", message)
+def get_previous_status(device_name, resource_name):
+    """Retrieve the previous status of a device/resource from the Excel log file."""
+    wb = load_workbook(LOG_FILE)
+    ws = wb.active
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] == device_name and row[1] == resource_name:
+            return row[3]  # Return the last known status
+    return None  # No previous status found
 
 
 def ping_device(ip_info, device_name):
-    """Ping a device."""
+    """Ping a device and return its status and response time."""
     ip = ip_info['value']
     print(f"Starting ping check for {device_name} ({ip_info['name']}) - {ip}")
-    if 'onlyports' in ip_info and ip_info['onlyports']:
-        return 0
     try:
-        command = ["ping", "-n", "1", ip] if platform.system().lower() == "windows" else ["ping", "-c", "1", ip]
         start_time = time.time()
+        command = ["ping", "-n", "1", ip] if platform.system().lower() == "windows" else ["ping", "-c", "1", ip]
         ping = subprocess.run(command, stdout=subprocess.PIPE)
-        end_time = (time.time() - start_time) * 1000
-        end_time = round(end_time, 2)
+        end_time = (time.time() - start_time) * 1000  # Convert to milliseconds
         if ping.returncode == 0:
-            log_scan("SUCCESS", f"{device_name} ({ip_info['name']}) Ping successful: {ip}")
-            print(f"Finished ping check for {device_name} ({ip_info['name']}) - Success ({end_time}ms)")
-            return end_time
+            print(f"    {device_name} ({ip_info['name']}) - {ONLINE} ({end_time:.2f}ms)")
+            return ONLINE, end_time
         else:
-            log_scan("FAILED", f"{device_name} ({ip_info['name']}) Ping failed: {ip}")
-            print(f"Finished ping check for {device_name} ({ip_info['name']}) - Failed ({end_time}ms)")
-            return None
-    except Exception as e:
-        log_error(f"{device_name} ({ip_info['name']}) Ping error: {ip}. {e}")
-        print(f"Finished ping check for {device_name} ({ip_info['name']}) - Error")
-        return None
+            print(f"    {device_name} ({ip_info['name']}) - {OFFLINE}")
+            return OFFLINE, None
+    except Exception:
+        print(f"    {device_name} ({ip_info['name']}) - {OFFLINE}")
+        return OFFLINE, None
 
 
 def check_port(ip_info, device_name):
@@ -138,93 +117,101 @@ def check_port(ip_info, device_name):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             result = sock.connect_ex((ip, port))
             if result == 0:
-                log_scan("SUCCESS", f"{device_name} ({ip_info['name']}) Port {port} is open on {ip}")
                 print(f"Finished port check for {device_name} ({ip_info['name']}) - Port {port} Open")
+                sock.close()
+                return ONLINE, None
             else:
-                log_scan("FAILED", f"{device_name} ({ip_info['name']}) Port {port} is closed on {ip}")
                 print(f"Finished port check for {device_name} ({ip_info['name']}) - Port {port} Closed")
-            sock.close()
+                sock.close()
+                return OFFLINE, None
+
         except Exception as e:
-            log_error(f"{device_name} ({ip_info['name']}) Port {port} check error on {ip}. {e}")
             print(f"Finished port check for {device_name} ({ip_info['name']}) - Error on Port {port}")
+            sock.close()
+            return OFFLINE, None
 
 
 def check_http(url_info, device_name):
-    """Check HTTP response."""
+    """Check HTTP response and return its status and response time."""
     url = url_info['value']
     print(f"Starting HTTP check for {device_name} ({url_info['name']}) - {url}")
     try:
         start_time = time.time()
         response = requests.get(url, timeout=5)
+        end_time = (time.time() - start_time) * 1000  # Convert to milliseconds
         if response.status_code == 200:
-            log_scan("SUCCESS", f"{device_name} ({url_info['name']}) HTTP check successful: {url}")
-            print(f"Finished HTTP check for {device_name} ({url_info['name']}) - Success")
-            return (time.time() - start_time) * 1000
+            print(f"    {device_name} ({url_info['name']}) - {ONLINE} ({end_time:.2f}ms)")
+            return ONLINE, end_time
         else:
-            log_scan("FAILED", f"{device_name} ({url_info['name']}) HTTP failed: {url}")
-            print(f"Finished HTTP check for {device_name} ({url_info['name']}) - Failed")
-            return None
-    except Exception as e:
-        log_error(f"{device_name} ({url_info['name']}) HTTP error: {url}. {e}")
-        print(f"Finished HTTP check for {device_name} ({url_info['name']}) - Error")
-        return None
+            print(f"    {device_name} ({url_info['name']}) - {OFFLINE}")
+            return OFFLINE, None
+    except Exception:
+        print(f"    {device_name} ({url_info['name']}) - {OFFLINE}")
+        return OFFLINE, None
 
 
 def check_directory(directory_info, device_name):
-    """Check if directory exists."""
+    """Check if directory exists and return its status."""
     directory = directory_info['value']
     print(f"Starting directory check for {device_name} ({directory_info['name']}) - {directory}")
     if os.path.exists(directory):
-        log_scan("SUCCESS", f"{device_name} ({directory_info['name']}) Directory check successful: {directory}")
-        print(f"Finished directory check for {device_name} ({directory_info['name']}) - Success")
-        return True
+        print(f"    {device_name} ({directory_info['name']}) - {ONLINE}")
+        return ONLINE, None  # No response time for directories
     else:
-        log_scan("FAILED", f"{device_name} ({directory_info['name']}) Directory not found: {directory}")
-        print(f"Finished directory check for {device_name} ({directory_info['name']}) - Failed")
-        return False
+        print(f"    {device_name} ({directory_info['name']}) - {OFFLINE}")
+        return OFFLINE, None
 
 
-def check_devices():
-    """Check all devices."""
-    offline_devices = {}
-    high_response_devices = {}
+def send_summary_email(offline_devices, online_devices):
+    if not offline_devices and not online_devices:
+        print("No changes in status since last run... all done.")
+        return
 
-    for device_name, resources in devices.items():
-        # Check URLs
-        if "urls" in resources:
-            for url_info in resources["urls"]:
-                response_time = check_http(url_info, device_name)
-                if response_time is None:
-                    offline_devices.setdefault(device_name, []).append(f"URL ({url_info['name']}): {url_info['value']}")
-                elif response_time > RESPONSE_TIME_THRESHOLD:
-                    high_response_devices.setdefault(device_name, []).append(f"URL ({url_info['name']}): {url_info['value']}")
+    offline_count = len(offline_devices)
+    online_count = len(online_devices)
+    body = ""
 
-        # Check IPs
-        if "ips" in resources:
-            for ip_info in resources["ips"]:
-                response_time = ping_device(ip_info, device_name)
-                if response_time is None:
-                    offline_devices.setdefault(device_name, []).append(f"IP ({ip_info['name']}): {ip_info['value']}")
-                elif response_time > RESPONSE_TIME_THRESHOLD:
-                    high_response_devices.setdefault(device_name, []).append(f"IP ({ip_info['name']}): {ip_info['value']}")
+    subject_parts = []
+    if offline_count > 0:
+        offline_label = "Device" if offline_count == 1 else "Devices"
+        subject_parts.append(f"{offline_count} New Offline {offline_label}")
+    if online_count > 0:
+        online_label = "Device" if online_count == 1 else "Devices"
+        subject_parts.append(f"{online_count} New Online {online_label}")
 
-                # Check Ports
-                check_port(ip_info, device_name)
+    subject = "Device Monitoring Report"
+    if subject_parts:
+        subject += " - " + " and ".join(subject_parts)
 
-        # Check directories
-        if "directories" in resources:
-            for directory_info in resources["directories"]:
-                if not check_directory(directory_info, device_name):
-                    offline_devices.setdefault(device_name, []).append(f"Directory ({directory_info['name']}): {directory_info['value']}")
+    if offline_devices:
+        body += "Devices that went offline:\n"
+        for device, resource, value, response_time in offline_devices:
+            if response_time:
+                append = f" - {response_time:.2f}ms"
+            else:
+                append = ""
+            body += f"{device} - {resource} ({value}){append}\n"
 
-    return offline_devices, high_response_devices
+    if online_devices:
+        body += "\nDevices that came back online:\n"
+        for device, resource, value, response_time in online_devices:
+            if response_time:
+                append = f" - {response_time:.2f}ms"
+            else:
+                append = ""
+            body += f"{device} - {resource} ({value}){append}\n"
+
+    send_email(subject, body)
 
 
 def send_email(subject, body):
-    """Send an email to multiple recipients."""
+    """Send an email to notify the recipient of status changes."""
+    print(f"Sending email to {', '.join(receiver_emails)}")
+    print(f"Subject: {subject}")
+    print(f"Body:\n{body}")
     message = MIMEMultipart()
     message["From"] = sender_email
-    message["To"] = ", ".join(receiver_emails)  # Join all recipient emails with a comma
+    message["To"] = ", ".join(receiver_emails)
     message["Subject"] = subject
     message.attach(MIMEText(body, "plain"))
 
@@ -234,38 +221,86 @@ def send_email(subject, body):
         server.login(sender_email, email_password)
         server.sendmail(sender_email, receiver_emails, message.as_string())
         server.quit()
-        print(f"Email sent to {', '.join(receiver_emails)}")
     except Exception as e:
-        log_error(f"Email failed: {e}")
+        print(f"Failed to send email: {e}")
 
 
-def prepare_email_body(offline_devices, high_response_devices):
-    """Prepare and send emails if there are offline or slow response devices."""
-    if not offline_devices and not high_response_devices:
-        print("All devices are online. No email sent.")
-        return  # Don't send an email if everything is online
+def check_devices():
+    """Check the status of all devices and collect any that changed status."""
+    offline_devices = []
+    online_devices = []
 
-    email_body = ""
+    for device_name, resources in devices.items():
+        # Check URLs
+        if "urls" in resources:
+            for url_info in resources["urls"]:
+                current_status, response_time = check_http(url_info, device_name)
+                previous_status = get_previous_status(device_name, url_info['name'])
 
-    # Handle offline devices
-    if offline_devices:
-        email_body += "Devices offline:\n"
-        for device, issues in offline_devices.items():
-            email_body += f"{device}:\n"
-            for issue in issues:
-                email_body += f"  {issue}\n"
+                # Update device status before the first status check
+                update_device_status(device_name, url_info['name'], "URL", current_status)
 
-    # Handle high response time devices
-    if high_response_devices:
-        email_body += "\nDevices with slow responses:\n"
-        for device, issues in high_response_devices.items():
-            email_body += f"{device}:\n"
-            for issue in issues:
-                email_body += f"  {issue}\n"
+                # Handle the case when it's the first run (no previous status)
+                if previous_status is None:
+                    if current_status == OFFLINE:
+                        offline_devices.append((device_name, url_info['name'], url_info['value'], response_time))
+                    elif current_status == ONLINE:
+                        online_devices.append((device_name, url_info['name'], url_info['value'], response_time))
+                    continue
 
-    # Include log file contents in the email body
-    with open(LOG_FILE, "r") as log_file:
-        email_body += "\n\nLog Details:\n"
-        email_body += log_file.read()
+                if previous_status == ONLINE and current_status == OFFLINE:
+                    offline_devices.append((device_name, url_info['name'], url_info['value'], response_time))
+                elif previous_status == OFFLINE and current_status == ONLINE:
+                    online_devices.append((device_name, url_info['name'], url_info['value'], response_time))
 
-    send_email(email_header, email_body)
+        # Check IPs
+        if "ips" in resources:
+            for ip_info in resources["ips"]:
+                if ip_info.get('ports'):
+                    check_port(ip_info, device_name)
+                else:
+                    current_status, response_time = ping_device(ip_info, device_name)
+                previous_status = get_previous_status(device_name, ip_info['name'])
+
+                # Update device status before the first status check
+                update_device_status(device_name, ip_info['name'], "IP", current_status)
+
+                # Handle the case when it's the first run (no previous status)
+                if previous_status is None:
+                    if current_status == OFFLINE:
+                        offline_devices.append((device_name, ip_info['name'], ip_info['value'], response_time))
+                    elif current_status == ONLINE:
+                        online_devices.append((device_name, ip_info['name'], ip_info['value'], response_time))
+                    continue
+
+                if previous_status == ONLINE and current_status == OFFLINE:
+                    offline_devices.append((device_name, ip_info['name'], ip_info['value'], response_time))
+                elif previous_status == OFFLINE and current_status == ONLINE:
+                    online_devices.append((device_name, ip_info['name'], ip_info['value'], response_time))
+
+        # Check directories
+        if "directories" in resources:
+            for directory_info in resources["directories"]:
+                current_status, response_time = check_directory(directory_info, device_name)
+                previous_status = get_previous_status(device_name, directory_info['name'])
+
+                # Update device status before the first status check
+                update_device_status(device_name, directory_info['name'], "Directory", current_status)
+
+                # Handle the case when it's the first run (no previous status)
+                if previous_status is None:
+                    if current_status == OFFLINE:
+                        offline_devices.append((device_name, directory_info['name'], directory_info['value'], response_time))
+                    elif current_status == ONLINE:
+                        online_devices.append((device_name, directory_info['name'], directory_info['value'], response_time))
+                    continue
+
+                if previous_status == ONLINE and current_status == OFFLINE:
+                    offline_devices.append((device_name, directory_info['name'], directory_info['value'], response_time))
+                elif previous_status == OFFLINE and current_status == ONLINE:
+                    online_devices.append((device_name, directory_info['name'], directory_info['value'], response_time))
+
+    return offline_devices, online_devices
+
+
+initialize_log()

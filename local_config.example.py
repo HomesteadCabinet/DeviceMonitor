@@ -1,10 +1,3 @@
-# DeviceMonitor
-
-Brad's Device Monitor. This is a simple program that monitors the devices on a network.  It is designed to be run on any computer that has Python installed.
-
-Configuration is done in the `main.py` file.  See the example configuration below as an example:
-
-```python
 # List of devices to monitor with named URLs, IPs, directories, and ports
 devices = {
     "ExampleDevice": {
@@ -45,4 +38,3 @@ receiver_emails = ["example@example.net", "example.1@example.net"]
 email_password = "roureyteww834n"
 smtp_server = "smtp.gmail.com"
 smtp_port = 587
-```

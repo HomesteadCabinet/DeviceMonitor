@@ -8,3 +8,7 @@ device_scan_log.csv
 last_cleared_date.tmp
 
 __pycache__/
+
+device_status_log.xlsx
+
+local_config.py
