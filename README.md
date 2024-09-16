@@ -40,6 +40,7 @@ devices = {
 
 # Email settings
 email_header = "Device Monitoring Report"
+sender_name = "Device Monitor"
 sender_email = "noreply@example.net"
 receiver_emails = ["example@example.net", "example.1@example.net"]
 email_password = "roureyteww834n"

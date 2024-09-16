@@ -5,8 +5,11 @@ import smtplib
 import local_config
 from datetime import datetime
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 import requests
 import time
 import socket
@@ -21,6 +24,7 @@ devices = local_config.devices
 # Email settings
 email_header = "Network Monitoring System"
 sender_email = local_config.sender_email
+sender_name = local_config.sender_name
 receiver_emails = local_config.receiver_emails
 email_password = local_config.email_password
 smtp_server = local_config.smtp_server
@@ -41,46 +45,73 @@ def initialize_log():
         ws = wb.active
         ws.title = "Device Status"
 
-        # Header row
-        headers = ["Device Name", "Resource", "Type", "Last Status", "Last Checked", "Previous Status"]
+        # Header row, the extra spaces are a way to make the column width larger
+        headers = [
+            "Device Name     ",
+            "Resource             ",
+            "Type",
+            "Status",
+            "Last Checked    ",
+            "Previous Status",
+            "Value                "
+        ]
         ws.append(headers)
+
+        # Resize columns to fit the data
+        bold_font = Font(bold=True, name="Arial", size=11)
+        for col_num, header in enumerate(headers, 1):
+            col_letter = get_column_letter(col_num)
+            ws[f"{col_letter}1"].font = bold_font
+            ws.column_dimensions[col_letter].width = len(header) + 8  # Adding some padding
 
         wb.save(LOG_FILE)
 
 
-def update_device_status(device_name, resource_name, resource_type, status):
+def update_device_status(device_name, resource_name, resource_type, status, value):
     """Update or insert device status in the Excel log file."""
     wb = load_workbook(LOG_FILE)
     ws = wb.active
 
     current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
     updated = False
+    arial_font = Font(name='Arial', size=10)
+    red_font = Font(name='Arial', size=10, color="CC2345")
 
     # Iterate over rows to find the matching device/resource and update the status
     for row in ws.iter_rows(min_row=2, values_only=False):
-        if row[0].value == device_name and row[1].value == resource_name:
+        if row[0].value == device_name and row[1].value == resource_name and row[2].value == resource_type:
             # Update existing entry
             previous_status = row[3].value
             row[5].value = previous_status  # Store previous status
             row[3].value = status           # Update to new status
             row[4].value = current_time     # Update the last checked time
+            row[6].value = value            # Log the cheked value
             updated = True
             break
 
     if not updated:
         # Add a new entry if device/resource not found
-        ws.append([device_name, resource_name, resource_type, status, current_time, ""])
+        ws.append([device_name, resource_name, resource_type, status, current_time, "", value])
+
+    # Apply Arial font to all cells and red font to entire row if status is offline
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        if row[3].value == OFFLINE:  # Column D is the status column
+            for cell in row:
+                cell.font = red_font
+        else:
+            for cell in row:
+                cell.font = arial_font
 
     wb.save(LOG_FILE)
 
 
-def get_previous_status(device_name, resource_name):
+def get_previous_status(device_name, resource_name, resource_type):
     """Retrieve the previous status of a device/resource from the Excel log file."""
     wb = load_workbook(LOG_FILE)
     ws = wb.active
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if row[0] == device_name and row[1] == resource_name:
+        if row[0] == device_name and row[1] == resource_name and row[2] == resource_type:
             return row[3]  # Return the last known status
     return None  # No previous status found
 
@@ -179,7 +210,7 @@ def send_summary_email(offline_devices, online_devices):
         online_label = "Device" if online_count == 1 else "Devices"
         subject_parts.append(f"{online_count} New Online {online_label}")
 
-    subject = "Device Monitoring Report"
+    subject = "Devices"
     if subject_parts:
         subject += " - " + " and ".join(subject_parts)
 
@@ -210,7 +241,7 @@ def send_email(subject, body):
     print(f"Subject: {subject}")
     print(f"Body:\n{body}")
     message = MIMEMultipart()
-    message["From"] = sender_email
+    message["From"] = formataddr((sender_name, sender_email))
     message["To"] = ", ".join(receiver_emails)
     message["Subject"] = subject
     message.attach(MIMEText(body, "plain"))
@@ -235,10 +266,10 @@ def check_devices():
         if "urls" in resources:
             for url_info in resources["urls"]:
                 current_status, response_time = check_http(url_info, device_name)
-                previous_status = get_previous_status(device_name, url_info['name'])
+                previous_status = get_previous_status(device_name, url_info['name'], "URL")
 
                 # Update device status before the first status check
-                update_device_status(device_name, url_info['name'], "URL", current_status)
+                update_device_status(device_name, url_info['name'], "URL", current_status, url_info['value'])
 
                 # Handle the case when it's the first run (no previous status)
                 if previous_status is None:
@@ -257,13 +288,13 @@ def check_devices():
         if "ips" in resources:
             for ip_info in resources["ips"]:
                 if ip_info.get('ports'):
-                    check_port(ip_info, device_name)
+                    current_status, response_time = check_port(ip_info, device_name)
                 else:
                     current_status, response_time = ping_device(ip_info, device_name)
-                previous_status = get_previous_status(device_name, ip_info['name'])
+                previous_status = get_previous_status(device_name, ip_info['name'], "IP")
 
                 # Update device status before the first status check
-                update_device_status(device_name, ip_info['name'], "IP", current_status)
+                update_device_status(device_name, ip_info['name'], "IP", current_status, ip_info['value'])
 
                 # Handle the case when it's the first run (no previous status)
                 if previous_status is None:
@@ -282,10 +313,10 @@ def check_devices():
         if "directories" in resources:
             for directory_info in resources["directories"]:
                 current_status, response_time = check_directory(directory_info, device_name)
-                previous_status = get_previous_status(device_name, directory_info['name'])
+                previous_status = get_previous_status(device_name, directory_info['name'], "Directory")
 
                 # Update device status before the first status check
-                update_device_status(device_name, directory_info['name'], "Directory", current_status)
+                update_device_status(device_name, directory_info['name'], "Directory", current_status, directory_info['value'])
 
                 # Handle the case when it's the first run (no previous status)
                 if previous_status is None:
