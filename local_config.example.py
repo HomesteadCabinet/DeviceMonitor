@@ -12,14 +12,12 @@ devices = {
                 'name': 'Example IP',
                 'value': '192.168.1.1'
             }, {
-                'name': 'Example IP With port',
+                'name': 'Example IP',
                 'value': '192.168.1.1',
-                'ports': [80, 443]
             }, {
                 'name': 'Example IP, only do a port scan',
                 'value': '192.168.1.1',
                 'ports': [80, 443],
-                'onlyports': True
             },
         ],
         "directories": [
