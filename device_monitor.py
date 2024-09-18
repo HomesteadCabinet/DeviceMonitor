@@ -4,9 +4,8 @@ import subprocess
 import smtplib
 import local_config
 from datetime import datetime
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font
+import gspread
+from google.oauth2.service_account import Credentials
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -14,15 +13,9 @@ import requests
 import time
 import socket
 
-# Constants for Online and Offline statuses
 ONLINE = "Online"
 OFFLINE = "Offline"
 
-# List of devices to monitor with named URLs, IPs, directories, and ports
-devices = local_config.devices
-
-# Email settings
-email_header = "Network Monitoring System"
 sender_email = local_config.sender_email
 sender_name = local_config.sender_name
 receiver_emails = local_config.receiver_emails
@@ -30,81 +23,146 @@ email_password = local_config.email_password
 smtp_server = local_config.smtp_server
 smtp_port = local_config.smtp_port
 
-# Threshold for slow response time (default 5 seconds = 5000 milliseconds)
+google_credentials = local_config.google_credentials
+google_sheet_id = local_config.google_sheet_id
+google_sheet_name = local_config.google_sheet_name
+
+devices = local_config.devices
 RESPONSE_TIME_THRESHOLD = 5000
 
-# Path to Excel log file
-TEMP_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(TEMP_DIR, "device_status_log.xlsx")
+ws = None
+cached_records = None  # Cache to store records
+last_cache_time = None  # Time when the cache was last updated
+CACHE_DURATION = 60  # Cache duration in seconds, adjust as needed
 
 
 def initialize_log():
-    """Initialize the Excel log file if it doesn't exist."""
-    if not os.path.exists(LOG_FILE):
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Device Status"
+    global ws
+    """Initialize the Google Sheet log if it doesn't exist."""
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
 
-        # Updated Header row with "Value" moved to column D and "Previous Status" after "Status"
-        headers = [
-            "Device Name      ",
-            "Resource         ",
-            "Type",
-            "Value                   ",
-            "Status",
-            "Previous Status",
-            "Last Checked       ",
-            "Offline Since      ",
-            "Online Since       "
-        ]
-        ws.append(headers)
+    try:
+        credentials = Credentials.from_service_account_info(google_credentials, scopes=scopes)
+        # Authorize with Google Sheets API
+        gc = gspread.authorize(credentials)
+    except Exception as e:
+        print(f"Failed to authenticate with Google Sheets API: {e}")
+        return None
 
-        # Resize columns to fit the data
-        bold_font = Font(bold=True, name="Arial", size=11)
-        for col_num, header in enumerate(headers, 1):
-            col_letter = get_column_letter(col_num)
-            ws[f"{col_letter}1"].font = bold_font
-            ws.column_dimensions[col_letter].width = max(len(header) + 8, 15)  # Adding some padding
+    try:
+        sh = gc.open_by_key(google_sheet_id)
+        try:
+            ws = sh.worksheet(google_sheet_name)
+            print(f"Worksheet '{google_sheet_name}' found and loaded successfully.")
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=google_sheet_name, rows="1000", cols="8")
+            print(f"Worksheet '{google_sheet_name}' created.")
+    except gspread.SpreadsheetNotFound:
+        print(f"Spreadsheet with ID {google_sheet_id} not found.")
+        ws = None
+    except Exception as e:
+        print(f"Error accessing Google Sheets: {e}")
+        ws = None
 
-        wb.save(LOG_FILE)
+    headers = [
+        "Device Name",
+        "Resource",
+        "Type",
+        "Value",
+        "Status",
+        "Previous Status",
+        "Last Checked",
+        "Offline Since",
+        "Online Since"
+    ]
+
+    if ws:
+        existing_headers = ws.row_values(1)
+        if not existing_headers:
+            try:
+                ws.append_row(headers)
+                print("Headers added to the Google Sheet.")
+            except Exception as e:
+                print(f"Failed to add headers to the Google Sheet: {e}")
+    else:
+        print("Error: Worksheet is None.")
+
+    return ws
+
+
+def load_records_from_cache():
+    """Load records from cache or fetch from Google Sheets if the cache is expired."""
+    global cached_records, last_cache_time
+
+    current_time = time.time()
+
+    # If cache is empty or expired, fetch fresh data from Google Sheets
+    if cached_records is None or (last_cache_time is None) or (current_time - last_cache_time > CACHE_DURATION):
+        print("Fetching fresh records from Google Sheets...")
+        try:
+            cached_records = ws.get_all_records()  # Fetch fresh data
+            last_cache_time = current_time
+        except Exception as e:
+            print(f"Failed to fetch records from Google Sheets: {e}")
+            cached_records = None
+
+    return cached_records
 
 
 def update_device_status(device_name, resource_name, resource_type, status, value):
-    """Update or insert device status in the Excel log file."""
-    wb = load_workbook(LOG_FILE)
-    ws = wb.active
-
+    global ws, cached_records
+    """Update or insert device status in the Google Sheet log using batched updates."""
     current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
-    updated = False
-    arial_font = Font(name='Arial', size=10)
-    red_font = Font(name='Arial', size=10, color="CC2345")
 
-    # Iterate over rows to find the matching device/resource and update the status
-    for row in ws.iter_rows(min_row=2, values_only=False):
-        if (row[0].value == device_name and row[1].value == resource_name and row[2].value == resource_type):
-            # Update existing entry
-            previous_status = row[4].value  # Status is now column E (index 4)
-            row[5].value = previous_status  # Previous Status is column F (index 5)
-            row[3].value = value            # Value is column D (index 3)
-            row[4].value = status            # Update to new status
-            row[6].value = current_time      # Last Checked is column G (index 6)
+    # Load cached records
+    records = load_records_from_cache()
+    if records is None:
+        print(f"Unable to update {device_name}, cached records are not available.")
+        return
 
-            # Update Offline Since and Online Since
-            if previous_status != status:
-                if status == OFFLINE:
-                    row[7].value = current_time    # Offline Since is column H (index 7)
-                    row[8].value = ""              # Clear Online Since
-                elif status == ONLINE:
-                    row[8].value = current_time    # Online Since is column I (index 8)
-                    row[7].value = ""              # Clear Offline Since
-            updated = True
+    # Find the row to update based on device_name, resource_name, and resource_type
+    row_to_update = None
+    for i, record in enumerate(records):
+        if (record["Device Name"] == device_name and
+            record["Resource"] == resource_name and
+            record["Type"] == resource_type):
+            row_to_update = i + 2  # +2 because records is 0-indexed and sheet row starts at 1 (header row)
             break
 
-    if not updated:
-        # Add a new entry if device/resource not found
+    if row_to_update:
+        # If the device/resource is found, batch all updates for this row
+        updates = [
+            {'range': f'D{row_to_update}', 'values': [[value]]},  # Update "Value"
+            {'range': f'E{row_to_update}', 'values': [[status]]},  # Update "Status"
+            {'range': f'G{row_to_update}', 'values': [[current_time]]},  # Update "Last Checked"
+        ]
+
+        # Update "Previous Status" and handle the status changes for "Offline Since" and "Online Since"
+        previous_status = ws.cell(row_to_update, 5).value  # Column 5 is 'Status'
+        updates.append({'range': f'F{row_to_update}', 'values': [[previous_status]]})  # Update "Previous Status"
+
+        if previous_status != status:
+            if status == OFFLINE:
+                updates.append({'range': f'H{row_to_update}', 'values': [[current_time]]})  # Update "Offline Since"
+                updates.append({'range': f'I{row_to_update}', 'values': [[""]]})  # Clear "Online Since"
+            elif status == ONLINE:
+                updates.append({'range': f'I{row_to_update}', 'values': [[current_time]]})  # Update "Online Since"
+                updates.append({'range': f'H{row_to_update}', 'values': [[""]]})  # Clear "Offline Since"
+
+        try:
+            ws.batch_update(updates)  # Batch all updates in one API call
+            print(f"Updated row {row_to_update} for {device_name} - {resource_name}.")
+            cached_records[row_to_update - 2]["Status"] = status  # Update the cached data
+        except Exception as e:
+            print(f"Failed to update row {row_to_update} for {device_name}: {e}")
+    else:
+        # If the device/resource is not found, append a new row
         offline_since = current_time if status == OFFLINE else ""
         online_since = current_time if status == ONLINE else ""
-        ws.append([
+        new_row = [
             device_name,
             resource_name,
             resource_type,
@@ -114,29 +172,42 @@ def update_device_status(device_name, resource_name, resource_type, status, valu
             current_time,
             offline_since,
             online_since
-        ])
-
-    # Apply Arial font to all cells and red font to entire row if status is offline
-    for row in ws.iter_rows(min_row=2, values_only=False):
-        if row[4].value == OFFLINE:  # Column E is the status column
-            for cell in row:
-                cell.font = red_font
-        else:
-            for cell in row:
-                cell.font = arial_font
-
-    wb.save(LOG_FILE)
+        ]
+        try:
+            ws.append_row(new_row)
+            print(f"Appended new row for {device_name} - {resource_name}.")
+            # Update cache by adding the new row
+            cached_records.append({
+                "Device Name": device_name,
+                "Resource": resource_name,
+                "Type": resource_type,
+                "Value": value,
+                "Status": status,
+                "Previous Status": "",
+                "Last Checked": current_time,
+                "Offline Since": offline_since,
+                "Online Since": online_since
+            })
+        except Exception as e:
+            print(f"Failed to append new row for {device_name} - {resource_name}: {e}")
 
 
 def get_previous_status(device_name, resource_name, resource_type):
-    """Retrieve the previous status of a device/resource from the Excel log file."""
-    wb = load_workbook(LOG_FILE)
-    ws = wb.active
+    global cached_records
 
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if (row[0] == device_name and row[1] == resource_name and row[2] == resource_type):
-            return row[4]  # Return the last known status from column E
-    return None  # No previous status found
+    """Retrieve the previous status of a device/resource from the cached Google Sheet log."""
+    records = load_records_from_cache()
+    if records is None:
+        print(f"Unable to retrieve status for {device_name}, cached records are not available.")
+        return None
+
+    for record in records:
+        if (record["Device Name"] == device_name and
+            record["Resource"] == resource_name and
+            record["Type"] == resource_type):
+            return record["Status"]
+
+    return None
 
 
 def ping_device(ip_info, device_name):
@@ -265,6 +336,9 @@ def send_summary_email(offline_devices, online_devices):
             else:
                 append = ""
             body += f"{device} - {resource} ({value}){append}\n"
+
+    google_sheet_link = f"https://docs.google.com/spreadsheets/d/{google_sheet_id}/edit#gid=0"
+    body += f"\n\n\nGoogle Sheet: {google_sheet_link}"
 
     send_email(subject, body)
 

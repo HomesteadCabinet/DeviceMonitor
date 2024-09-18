@@ -12,3 +12,5 @@ __pycache__/
 device_status_log.xlsx
 
 local_config.py
+
+.venv/
